@@ -15,18 +15,13 @@ from aiogram.client.telegram import TelegramAPIServer
 from PIL import Image, ImageDraw, ImageFont
 import config
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-# ТВОЙ НОВЫЙ ADMIN ID
 ADMIN_ID = 1780243441 
-
-# === ССЫЛКА НА ТВОЙ ПОРТАЛ ===
 PORTAL_URL = "https://misu-portal.vercel.app" 
-# ===============================
 
 session = AiohttpSession(api=TelegramAPIServer.from_base(config.API_SERVER))
 bot = Bot(token=config.TOKEN, session=session)
@@ -93,6 +88,10 @@ def generate_check_image(amount, coin, title="Crypto Check"):
 # === СТАРТ ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    global pending_action, pending_coin
+    pending_action = None
+    pending_coin = "USDT"
+
     args = message.text.split()
     if len(args) > 1:
         if args[1].startswith("check_"):
@@ -102,69 +101,68 @@ async def cmd_start(message: Message):
             await process_invoice_payment(message, args[1].replace("pay_", ""))
             return
 
-    wallet_url = f"https://misu-site.vercel.app/?user_id={message.from_user.id}"
-    
-    # Кнопки как на скрине + твои старые функции
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Open Portals", web_app=WebAppInfo(url=PORTAL_URL))],
         [InlineKeyboardButton(text="Join the community", url="https://t.me/theportal")],
-        [InlineKeyboardButton(text="Contact support", url="https://t.me/zovmode")],
-        # Оставил доступ к твоему кошельку и чекам, чтобы не потерять функционал
-        [InlineKeyboardButton(text="💼 Кошелек", web_app=WebAppInfo(url=wallet_url))],
-        [InlineKeyboardButton(text="Создать чек", callback_data="create_check_menu"), 
-         InlineKeyboardButton(text="Создать счет", callback_data="create_invoice_menu")]
+        [InlineKeyboardButton(text="Contact support", url="https://t.me/zovmode")]
     ])
     
     caption_text = (
         "Welcome to Portals! Discover, trade, and collect unique digital gifts in our marketplace. Start exploring now!"
     )
 
+    # Твой file_id для картинки
+    photo_file_id = "AgACAgUAAxkBAAEkFMxq5h_wwNR23b-9n7xdcqax53MvQwACaxVrG3VpMFf7gjXKqUmioQEAAwIAA3kAAz0E"
+
     try:
-        # Отправляем гифку с текстом и кнопками
-        await message.answer_animation(
-            animation="https://f.2fools.app/tgs/sticker_set/ff4fb858.gif",
+        await message.answer_photo(
+            photo=photo_file_id,
             caption=caption_text,
             reply_markup=kb
         )
     except Exception as e:
-        logging.error(f"Ошибка отправки гифки: {e}")
-        # Если гифка не загрузится, отправим просто текст
+        logging.error(f"Ошибка отправки картинки: {e}")
         await message.answer(caption_text, reply_markup=kb)
 
-# === КОМАНДЫ ДЛЯ ЧАТОВ ===
+# === СКРЫТОЕ МЕНЮ (ЧЕКИ, СЧЕТА) ===
+@dp.message(Command("menu"))
+async def cmd_menu(message: Message):
+    wallet_url = f"https://misu-site.vercel.app/?user_id={message.from_user.id}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💼 Кошелек", web_app=WebAppInfo(url=wallet_url))],
+        [InlineKeyboardButton(text="Создать чек", callback_data="create_check_menu"), 
+         InlineKeyboardButton(text="Создать счет", callback_data="create_invoice_menu")]
+    ])
+    await message.answer("Дополнительные функции:", reply_markup=kb)
+
 @dp.message(Command("send"))
 async def cmd_send_in_chat(message: Message):
     args = message.text.split()
     if len(args) < 3:
         return await message.answer("Использование: /send 10 TRX\nДоступные валюты: USDT, GRAM, SOL, TRX")
-    
     try:
         amount = float(args[1])
         coin = args[2].upper()
         if coin not in ['USDT', 'GRAM', 'SOL', 'TRX']:
-            return await message.answer("Неверная валюта. Доступны: USDT, GRAM, SOL, TRX")
+            return await message.answer("Неверная валюта.")
     except:
         return await message.answer("Ошибка. Пример: /send 10 TRX")
-    
     await create_check_logic(message, amount, coin)
 
 @dp.message(Command("invoice"))
 async def cmd_invoice_in_chat(message: Message):
     args = message.text.split()
     if len(args) < 3:
-        return await message.answer("Использование: /invoice 50 USDT\nДоступные валюты: USDT, GRAM, SOL, TRX")
-    
+        return await message.answer("Использование: /invoice 50 USDT")
     try:
         amount = float(args[1])
         coin = args[2].upper()
         if coin not in ['USDT', 'GRAM', 'SOL', 'TRX']:
-            return await message.answer("Неверная валюта. Доступны: USDT, GRAM, SOL, TRX")
+            return await message.answer("Неверная валюта.")
     except:
         return await message.answer("Ошибка. Пример: /invoice 50 USDT")
-    
     await create_invoice_logic(message, amount, coin)
 
-# === МЕНЮ КНОПОК ===
 @dp.callback_query(F.data == "create_check_menu")
 async def check_currency_menu(callback: CallbackQuery):
     global pending_action
@@ -198,27 +196,21 @@ async def ask_amount(callback: CallbackQuery):
 async def handle_amount_input(message: Message):
     global pending_action, pending_coin
     amount = float(message.text)
-    
     if pending_action == "check":
         await create_check_logic(message, amount, pending_coin)
     elif pending_action == "invoice":
         await create_invoice_logic(message, amount, pending_coin)
-        
     pending_action = None
 
-# === СОЗДАНИЕ ЧЕКА ===
 async def create_check_logic(message: Message, amount: float, coin: str):
     if amount <= 0: return await message.answer("Сумма должна быть больше 0")
-    
     balance_field = f"{coin.lower()}_balance"
     con = get_db(); cur = con.cursor()
     cur.execute(f"SELECT {balance_field} FROM users WHERE user_id = %s", (message.from_user.id,))
     row = cur.fetchone()
-    
     if not row or row[0] < amount:
         cur.close(); con.close()
         return await message.answer(f"Недостаточно {coin} на балансе.")
-    
     cur.execute(f"UPDATE users SET {balance_field} = {balance_field} - %s WHERE user_id = %s", (amount, message.from_user.id))
     cur.execute("INSERT INTO checks (creator_id, amount, coin, is_activated) VALUES (%s, %s, %s, false) RETURNING id", (message.from_user.id, amount, coin))
     check_id = cur.fetchone()[0]
@@ -233,10 +225,8 @@ async def create_check_logic(message: Message, amount: float, coin: str):
     await bot.send_photo(chat_id=message.chat.id, photo=photo, caption=caption, reply_markup=kb)
     if os.path.exists(img_path): os.remove(img_path)
 
-# === СОЗДАНИЕ СЧЕТА ===
 async def create_invoice_logic(message: Message, amount: float, coin: str):
     if amount <= 0: return await message.answer("Сумма должна быть больше 0")
-    
     con = get_db(); cur = con.cursor()
     cur.execute("INSERT INTO checks (creator_id, amount, coin, is_activated) VALUES (%s, %s, %s, false) RETURNING id", (message.from_user.id, amount, coin))
     invoice_id = cur.fetchone()[0]
@@ -251,81 +241,56 @@ async def create_invoice_logic(message: Message, amount: float, coin: str):
     await bot.send_photo(chat_id=message.chat.id, photo=photo, caption=caption, reply_markup=kb)
     if os.path.exists(img_path): os.remove(img_path)
 
-# === АКТИВАЦИЯ ЧЕКА ===
 async def process_check_activation(message: Message, check_id: str):
     con = get_db(); cur = con.cursor()
     cur.execute("SELECT amount, coin, is_activated, creator_id FROM checks WHERE id = %s", (check_id,))
     row = cur.fetchone()
-    
     if not row: cur.close(); con.close(); return await message.answer("Чек не найден.")
     amount, coin, is_activated, creator_id = row
-    
     if is_activated: cur.close(); con.close(); return await message.answer("Этот чек уже активирован.")
     if creator_id == message.from_user.id: cur.close(); con.close(); return await message.answer("Нельзя активировать свой же чек.")
-    
     balance_field = f"{coin.lower()}_balance"
     cur.execute(f"UPDATE users SET {balance_field} = {balance_field} + %s WHERE user_id = %s", (amount, message.from_user.id))
     cur.execute("UPDATE checks SET is_activated = true, activated_by = %s WHERE id = %s", (message.from_user.id, check_id))
     con.commit(); cur.close(); con.close()
-    
     await message.answer(f"Вы активировали чек и получили {amount} {coin}!")
-    
     try:
         user_info = await bot.get_chat(message.from_user.id)
         name = user_info.first_name or "Пользователь"
         if user_info.username: name = f"@{user_info.username}"
         user_link = f'<a href="tg://user?id={message.from_user.id}">{name}</a>'
-        
-        await bot.send_message(
-            creator_id, 
-            f"🔔 Ваш чек на {amount} {coin} активировал {user_link}!", 
-            parse_mode="HTML"
-        )
+        await bot.send_message(creator_id, f"🔔 Ваш чек на {amount} {coin} активировал {user_link}!", parse_mode="HTML")
     except Exception as e:
-        logging.error(f"ОШИБКА УВЕДОМЛЕНИЯ создателю {creator_id}: {e}")
+        logging.error(f"ОШИБКА УВЕДОМЛЕНИЯ: {e}")
 
-# === ОПЛАТА СЧЕТА ===
 async def process_invoice_payment(message: Message, invoice_id: str):
     con = get_db(); cur = con.cursor()
     cur.execute("SELECT amount, coin, is_activated, creator_id FROM checks WHERE id = %s", (invoice_id,))
     row = cur.fetchone()
-    
     if not row: cur.close(); con.close(); return await message.answer("Счет не найден.")
     amount, coin, is_activated, creator_id = row
-    
     if is_activated: cur.close(); con.close(); return await message.answer("Этот счет уже оплачен.")
     if creator_id == message.from_user.id: cur.close(); con.close(); return await message.answer("Нельзя оплатить свой же счет.")
-    
     balance_field = f"{coin.lower()}_balance"
     cur.execute(f"SELECT {balance_field} FROM users WHERE user_id = %s", (message.from_user.id,))
     payer = cur.fetchone()
-    
     if not payer or payer[0] < amount:
         cur.close(); con.close()
         return await message.answer(f"Недостаточно {coin} для оплаты счета.")
-    
     cur.execute(f"UPDATE users SET {balance_field} = {balance_field} - %s WHERE user_id = %s", (amount, message.from_user.id))
     cur.execute(f"UPDATE users SET {balance_field} = {balance_field} + %s WHERE user_id = %s", (amount, creator_id))
     cur.execute("UPDATE checks SET is_activated = true, activated_by = %s WHERE id = %s", (message.from_user.id, invoice_id))
     con.commit(); cur.close(); con.close()
-    
     await message.answer(f"Вы оплатили счет на {amount} {coin}!")
-    
     try:
         user_info = await bot.get_chat(message.from_user.id)
         name = user_info.first_name or "Пользователь"
         if user_info.username: name = f"@{user_info.username}"
         user_link = f'<a href="tg://user?id={message.from_user.id}">{name}</a>'
-        
-        await bot.send_message(
-            creator_id, 
-            f"🔔 Ваш счет на {amount} {coin} оплатил {user_link}!", 
-            parse_mode="HTML"
-        )
+        await bot.send_message(creator_id, f"🔔 Ваш счет на {amount} {coin} оплатил {user_link}!", parse_mode="HTML")
     except Exception as e:
-        logging.error(f"ОШИБКА УВЕДОМЛЕНИЯ создателю {creator_id}: {e}")
+        logging.error(f"ОШИБКА УВЕДОМЛЕНИЯ: {e}")
 
-# === АДМИН-ПАНЕЛЬ ===
 @dp.message(Command("admin_panel"))
 async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
@@ -341,7 +306,6 @@ async def reset_all_balances(callback: CallbackQuery):
     await callback.message.answer("Все балансы обнулены.")
     await callback.answer()
 
-# === ОПЛАТА STARS ===
 @dp.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
