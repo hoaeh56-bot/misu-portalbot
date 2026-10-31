@@ -1,14 +1,13 @@
 import asyncio
 import logging
 import os
-import json
 import psycopg2
 import aiohttp_cors
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, BaseMiddleware
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import (
-    Message, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton, TelegramObject
+    Message, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton, BusinessConnection
 )
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
@@ -26,29 +25,12 @@ session = AiohttpSession(api=TelegramAPIServer.from_base(config.API_SERVER))
 bot = Bot(token=config.TOKEN, session=session)               
 portal_bot = Bot(token=PORTAL_BOT_TOKEN, session=session)    
 
-# Два разных диспетчера
+# Два разных диспетчера (чтобы боты не конфликтовали)
 dp_main = Dispatcher()
 dp_portal = Dispatcher()
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres.ptcofqwsvyytcnoerazu:22E%23bS%23aMcN%40L6A@aws-0-eu-north-1.pooler.supabase.com:5432/postgres")
 def get_db(): return psycopg2.connect(DATABASE_URL)
-
-# ==========================================
-# МИДЛВАРЬ: ЛОВИМ ВООБЩЕ ВСЕ АПДЕЙТЫ (ДЕБАГ)
-# ==========================================
-class AllUpdatesLogger(BaseMiddleware):
-    async def __call__(self, handler, event: TelegramObject, data: dict):
-        try:
-            # Выводим в логи всё, что прилетело на сервер
-            raw_json = event.model_dump_json(exclude_none=True, indent=2)
-            logging.info(f"🔥 СЫРОЙ АПДЕЙТ: {raw_json}")
-        except Exception as e:
-            logging.error(f"Ошибка логирования: {e}")
-        # Пропускаем событие дальше по цепочке
-        return await handler(event, data)
-
-# Подключаем логгер ко всем апдейтам бизнес-бота
-dp_portal.update.outer_middleware(AllUpdatesLogger())
 
 # ==========================================
 # ОСНОВНОЙ БОТ (КНОПКИ, СТАРТ)
@@ -78,6 +60,37 @@ async def cmd_start(message: Message):
     photo_file_id = "AgACAgUAAxkBAAEkFMxq5h_wwNR23b-9n7xdcqax53MvQwACaxVrG3VpMFf7gjXKqUmioQEAAwIAA3kAAz0E"
     try: await message.answer_photo(photo=photo_file_id, caption="Welcome to Portals!", reply_markup=kb)
     except: await message.answer("Welcome to Portals!", reply_markup=kb)
+
+# ==========================================
+# БИЗНЕС-БОТ: ЛОВИМ ID ПОДКЛЮЧЕНИЯ
+# ==========================================
+@dp_portal.business_connection()
+async def on_business_connection(connection: BusinessConnection):
+    # Вот он — уникальный ID подключения
+    connection_id = connection.id
+    
+    logging.info("==============================================")
+    logging.info(f"🔥 БОТ ПОДКЛЮЧЕН! Business Connection ID: {connection_id}")
+    logging.info("==============================================")
+    
+    # Сохраняем его в файл и в базу (на всякий случай)
+    try:
+        with open("business_connection_id.txt", "w") as f:
+            f.write(connection_id)
+            
+        con = get_db(); cur = con.cursor()
+        # Создаем таблицу для настроек, если ее нет
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key text primary key,
+                value text
+            )
+        """)
+        cur.execute("INSERT INTO settings (key, value) VALUES ('business_connection_id', %s) ON CONFLICT (key) DO UPDATE SET value = %s", (connection_id, connection_id))
+        con.commit(); cur.close(); con.close()
+        logging.info("ID сохранен в базу данных.")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения ID: {e}")
 
 # ==========================================
 # ВЕБ-СЕРВЕР (ДЛЯ САЙТА)
@@ -124,6 +137,7 @@ async def start_web_server():
     runner = web.AppRunner(app); await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 10000)))
     await site.start()
+    logging.info("ВЕБ-СЕРВЕР ЗАПУЩЕН")
 
 # ==========================================
 # ЗАПУСК
@@ -143,7 +157,7 @@ async def main():
     logging.info("Запуск основного бота...")
     asyncio.create_task(dp_main.start_polling(bot))
     
-    logging.info("Запуск бизнес-бота (СЫРОЙ ЛОГ)...")
+    logging.info("Запуск бизнес-бота (ожидание подключения)...")
     await dp_portal.start_polling(portal_bot)
 
 if __name__ == "__main__":
