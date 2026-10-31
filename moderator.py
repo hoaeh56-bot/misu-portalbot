@@ -1,12 +1,15 @@
 import asyncio
 import logging
 import os
+import json
 import psycopg2
 import aiohttp_cors
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
+)
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 import config
@@ -30,6 +33,9 @@ dp_portal = Dispatcher()
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres.ptcofqwsvyytcnoerazu:22E%23bS%23aMcN%40L6A@aws-0-eu-north-1.pooler.supabase.com:5432/postgres")
 def get_db(): return psycopg2.connect(DATABASE_URL)
 
+# ==========================================
+# ОСНОВНОЙ БОТ (КНОПКИ, СТАРТ)
+# ==========================================
 @dp_main.message(CommandStart())
 async def cmd_start(message: Message):
     try:
@@ -56,21 +62,21 @@ async def cmd_start(message: Message):
     try: await message.answer_photo(photo=photo_file_id, caption="Welcome to Portals!", reply_markup=kb)
     except: await message.answer("Welcome to Portals!", reply_markup=kb)
 
+# ==========================================
+# БИЗНЕС-БОТ (ДЕБАГ РЕЖИМ - ВЫВОДИТ ВСЁ В ЛОГИ)
+# ==========================================
 @dp_portal.business_message()
-async def handle_business_message(message: Message):
-    if message.gift:
-        sender_id = message.from_user.id if message.from_user else None
-        gift_name = f"Gift ID: {message.gift.id}"
-        logging.info(f"🎁 Поймали подарок {gift_name} от {sender_id}")
-        if sender_id:
-            try:
-                con = get_db(); cur = con.cursor()
-                cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id, status) VALUES (%s, %s, 'from_account', 'inventory')", (sender_id, gift_name))
-                con.commit(); cur.close(); con.close()
-                await bot.send_message(sender_id, f"🎁 Подарок зачислен в инвентарь на портале!")
-            except Exception as e:
-                logging.error(f"Ошибка базы: {e}")
+async def debug_business(message: Message):
+    try:
+        # Превращаем сообщение в словарь и выводим в логи
+        message_dict = message.model_dump()
+        logging.info(f"🔥 ДЕБАГ БИЗНЕС-СООБЩЕНИЯ: {json.dumps(message_dict, indent=2, ensure_ascii=False)}")
+    except Exception as e:
+        logging.error(f"Ошибка дебага: {e}")
 
+# ==========================================
+# ВЕБ-СЕРВЕР (ДЛЯ САЙТА)
+# ==========================================
 async def handle_buy_gift(request):
     try:
         data = await request.json()
@@ -96,10 +102,13 @@ async def handle_buy_gift(request):
         cur.execute("UPDATE market_items SET is_sold = true WHERE id = %s", (gift_id,))
         cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id, status) VALUES (%s, %s, %s, 'inventory')", (user_id, item[0], gift_id))
         con.commit(); cur.close(); con.close()
+        
         return web.json_response({"status": "ok", "crystals": int(price_gram*100)})
-    except Exception as e: return web.json_response({"status": "error"}, status=500)
+    except Exception as e: 
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-async def handle_ping(request): return web.Response(text="OK")
+async def handle_ping(request): 
+    return web.Response(text="OK")
 
 async def start_web_server():
     app = web.Application()
@@ -111,10 +120,13 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 10000)))
     await site.start()
 
+# ==========================================
+# ЗАПУСК
+# ==========================================
 async def main():
     asyncio.create_task(start_web_server())
     
-    # ЖЕСТКАЯ ОЧИСТКА ВЕБХУКОВ (убивает старые сессии)
+    # Очистка
     logging.info("Очистка старых вебхуков...")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
@@ -122,11 +134,11 @@ async def main():
     except Exception as e:
         logging.error(f"Ошибка очистки: {e}")
     
-    # Запуск ботов в фоне
+    # Запуск
     logging.info("Запуск основного бота...")
     asyncio.create_task(dp_main.start_polling(bot))
     
-    logging.info("Запуск бизнес-бота...")
+    logging.info("Запуск бизнес-бота (дебаг)...")
     await dp_portal.start_polling(portal_bot)
 
 if __name__ == "__main__":
