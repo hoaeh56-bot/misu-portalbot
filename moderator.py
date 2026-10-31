@@ -1,4 +1,4 @@
-import asyncio
+ import asyncio
 import logging
 import os
 import psycopg2
@@ -25,7 +25,6 @@ dp = Dispatcher()
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres.ptcofqwsvyytcnoerazu:22E%23bS%23aMcN%40L6A@aws-0-eu-north-1.pooler.supabase.com:5432/postgres")
 def get_db(): return psycopg2.connect(DATABASE_URL)
 
-# === СТАРТ (КАРТИНКА + 3 КНОПКИ + СОХРАНЕНИЕ АВАТАРКИ) ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     avatar_url = ""
@@ -34,9 +33,10 @@ async def cmd_start(message: Message):
         if photos.total_count > 0:
             file_id = photos.photos[0][-1].file_id
             file = await bot.get_file(file_id)
-            avatar_url = f"https://api.telegram.org/file/bot{config.TOKEN}/{file.file_path}"
+            # ФИКС: используем API_SERVER (Мисуграм) вместо api.telegram.org
+            avatar_url = f"{config.API_SERVER}/file/bot{config.TOKEN}/{file.file_path}"
     except Exception as e:
-        logging.error(f"Не удалось получить аву: {e}")
+        logging.error(f"Ава не скачалась: {e}")
 
     try:
         con = get_db(); cur = con.cursor()
@@ -54,86 +54,57 @@ async def cmd_start(message: Message):
         logging.error(f"Ошибка профиля: {e}")
 
     portal_url = f"{PORTAL_URL}?user_id={message.from_user.id}"
-    
-    # ТУТ ВОЗВРАЩЕНЫ ВСЕ 3 КНОПКИ
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Open Portals", web_app=WebAppInfo(url=portal_url))],
         [InlineKeyboardButton(text="Join the community", url="https://t.me/theportal")],
         [InlineKeyboardButton(text="Contact support", url="https://t.me/zovmode")]
     ])
-    
     photo_file_id = "AgACAgUAAxkBAAEkFMxq5h_wwNR23b-9n7xdcqax53MvQwACaxVrG3VpMFf7gjXKqUmioQEAAwIAA3kAAz0E"
     try: await message.answer_photo(photo=photo_file_id, caption="Welcome to Portals!", reply_markup=kb)
     except: await message.answer("Welcome to Portals!", reply_markup=kb)
 
-# === ПРИЕМ ЗАЯВКИ НА ВЫВОД ===
 async def handle_notify(request):
     try:
         data = await request.json()
-        user_id = int(data.get("user_id"))
-        gift_name = data.get("gift_name")
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Зачислить в инвентарь", callback_data=f"approve_{user_id}_{gift_name}")]
-        ])
-        await bot.send_message(
-            ADMIN_ID, 
-            f"🔔 **Заявка на вывод!**\n\nЮзер `{user_id}` переслал подарок: **{gift_name}**.\n\nПроверь аккаунт и нажми кнопку:",
-            reply_markup=kb,
-            parse_mode="Markdown"
-        )
+        user_id, gift_name = int(data.get("user_id")), data.get("gift_name")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Зачислить", callback_data=f"approve_{user_id}_{gift_name}")]])
+        await bot.send_message(ADMIN_ID, f"🔔 **Заявка!**\nЮзер `{user_id}` переслал: **{gift_name}**.", reply_markup=kb, parse_mode="Markdown")
         return web.json_response({"status": "ok"})
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)}, status=500)
+    except Exception as e: return web.json_response({"status": "error"}, status=500)
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def process_approve(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        return await callback.answer("Только для админа!", show_alert=True)
+    if callback.from_user.id != ADMIN_ID: return
     parts = callback.data.split("_", 2)
-    user_id = int(parts[1])
-    gift_name = parts[2]
-    try:
-        con = get_db(); cur = con.cursor()
-        cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id, status) VALUES (%s, %s, 'manual', 'inventory')", (user_id, gift_name))
-        con.commit(); cur.close(); con.close()
-        await callback.message.edit_text(f"✅ Подарок '{gift_name}' зачислен юзеру {user_id}!")
-        await bot.send_message(user_id, f"🎁 Ваш подарок '{gift_name}' успешно зачислен в инвентарь!")
-    except Exception as e:
-        await callback.message.edit_text(f"Ошибка: {e}")
+    user_id, gift_name = int(parts[1]), parts[2]
+    con = get_db(); cur = con.cursor()
+    cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id, status) VALUES (%s, %s, 'manual', 'inventory')", (user_id, gift_name))
+    con.commit(); cur.close(); con.close()
+    await callback.message.edit_text(f"✅ '{gift_name}' зачислен юзеру {user_id}!")
+    await bot.send_message(user_id, f"🎁 Подарок '{gift_name}' в инвентаре!")
 
-# === ПОКУПКА ПОДАРКОВ ===
 async def handle_buy_gift(request):
     try:
         data = await request.json()
-        user_id = int(data.get("user_id"))
-        gift_id = data.get("gift_id")
-        price_gram = float(data.get("price_gram"))
-        seller_id = data.get("seller_id")
-        
+        user_id, gift_id, price_gram, seller_id = int(data.get("user_id")), data.get("gift_id"), float(data.get("price_gram")), data.get("seller_id")
         con = get_db(); cur = con.cursor()
         cur.execute("SELECT name FROM market_items WHERE id = %s AND is_sold = false", (gift_id,))
         item = cur.fetchone()
-        if not item: return web.json_response({"status": "error", "message": "Уже продан"}, status=400)
-        
+        if not item: return web.json_response({"status": "error", "message": "Продан"}, status=400)
         cur.execute("SELECT gram_balance, balance FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if not row or float(row[0]) < price_gram: return web.json_response({"status": "error", "message": "Мало GRAM"}, status=400)
         
         new_gram = float(row[0]) - price_gram
         new_crystals = int(row[1] or 0) + int(price_gram * 100)
-        
         cur.execute("UPDATE users SET gram_balance = %s, balance = %s WHERE user_id = %s", (new_gram, new_crystals, user_id))
         if seller_id: cur.execute("UPDATE users SET gram_balance = gram_balance + %s WHERE user_id = %s", (price_gram, seller_id))
         cur.execute("UPDATE market_items SET is_sold = true WHERE id = %s", (gift_id,))
         cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id, status) VALUES (%s, %s, %s, 'inventory')", (user_id, item[0], gift_id))
         con.commit(); cur.close(); con.close()
-        
         return web.json_response({"status": "ok", "crystals": int(price_gram*100)})
-    except Exception as e: 
-        return web.json_response({"status": "error", "message": str(e)}, status=500)
+    except Exception as e: return web.json_response({"status": "error"}, status=500)
 
-# === ВЕБ-СЕРВЕР ===
 async def handle_ping(request): return web.Response(text="OK")
 
 async def start_web_server():
