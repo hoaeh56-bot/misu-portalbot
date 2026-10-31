@@ -25,12 +25,11 @@ dp = Dispatcher()
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres.ptcofqwsvyytcnoerazu:22E%23bS%23aMcN%40L6A@aws-0-eu-north-1.pooler.supabase.com:5432/postgres")
 def get_db(): return psycopg2.connect(DATABASE_URL)
 
-# === СТАРТ (СКАЧИВАЕМ АВАТАРКУ И СОХРАНЯЕМ ПРОФИЛЬ) ===
+# === СТАРТ (КАРТИНКА + 3 КНОПКИ + СОХРАНЕНИЕ АВАТАРКИ) ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     avatar_url = ""
     try:
-        # Пытаемся получить аватарку пользователя
         photos = await bot.get_user_profile_photos(message.from_user.id, limit=1)
         if photos.total_count > 0:
             file_id = photos.photos[0][-1].file_id
@@ -55,14 +54,19 @@ async def cmd_start(message: Message):
         logging.error(f"Ошибка профиля: {e}")
 
     portal_url = f"{PORTAL_URL}?user_id={message.from_user.id}"
+    
+    # ТУТ ВОЗВРАЩЕНЫ ВСЕ 3 КНОПКИ
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Open Portals", web_app=WebAppInfo(url=portal_url))]
+        [InlineKeyboardButton(text="Open Portals", web_app=WebAppInfo(url=portal_url))],
+        [InlineKeyboardButton(text="Join the community", url="https://t.me/theportal")],
+        [InlineKeyboardButton(text="Contact support", url="https://t.me/zovmode")]
     ])
+    
     photo_file_id = "AgACAgUAAxkBAAEkFMxq5h_wwNR23b-9n7xdcqax53MvQwACaxVrG3VpMFf7gjXKqUmioQEAAwIAA3kAAz0E"
     try: await message.answer_photo(photo=photo_file_id, caption="Welcome to Portals!", reply_markup=kb)
     except: await message.answer("Welcome to Portals!", reply_markup=kb)
 
-# === ПРИЕМ ЗАЯВКИ НА ВЫВОД ОТ САЙТА ===
+# === ПРИЕМ ЗАЯВКИ НА ВЫВОД ===
 async def handle_notify(request):
     try:
         data = await request.json()
@@ -82,27 +86,23 @@ async def handle_notify(request):
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-# === КНОПКА ПОДТВЕРЖДЕНИЯ ДЛЯ ТЕБЯ ===
 @dp.callback_query(F.data.startswith("approve_"))
 async def process_approve(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return await callback.answer("Только для админа!", show_alert=True)
-        
     parts = callback.data.split("_", 2)
     user_id = int(parts[1])
     gift_name = parts[2]
-    
     try:
         con = get_db(); cur = con.cursor()
         cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id, status) VALUES (%s, %s, 'manual', 'inventory')", (user_id, gift_name))
         con.commit(); cur.close(); con.close()
-        
         await callback.message.edit_text(f"✅ Подарок '{gift_name}' зачислен юзеру {user_id}!")
         await bot.send_message(user_id, f"🎁 Ваш подарок '{gift_name}' успешно зачислен в инвентарь!")
     except Exception as e:
         await callback.message.edit_text(f"Ошибка: {e}")
 
-# === ПОКУПКА ПОДАРКА ИЗ МИНИ-АППА ===
+# === ПОКУПКА ПОДАРКОВ ===
 async def handle_buy_gift(request):
     try:
         data = await request.json()
