@@ -14,19 +14,26 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 import config
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 ADMIN_ID = 1780243441 
 PORTAL_URL = "https://misu-portal.vercel.app" 
 
+# === ТВОЙ НОВЫЙ ТОКЕН ОТ БИЗНЕС-БОТА (@portal_gifts_bot) ===
+PORTAL_BOT_TOKEN = "1780243445:wEWoLT8Cbm2xJHSReMfxV51kCtpIPdfLOJ5"
+
+# Создаем сессию для подключения к серверам Missgram
 session = AiohttpSession(api=TelegramAPIServer.from_base(config.API_SERVER))
+
+# Твой основной бот (который в config.py)
 bot = Bot(token=config.TOKEN, session=session)
+
+# Твой новый бизнес-бот (который ловит подарки)
+portal_bot = Bot(token=PORTAL_BOT_TOKEN, session=session)
+
 dp = Dispatcher()
 
+# Твоя база данных
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", 
     "postgresql://postgres.ptcofqwsvyytcnoerazu:22E%23bS%23aMcN%40L6A@aws-0-eu-north-1.pooler.supabase.com:5432/postgres"
@@ -35,7 +42,7 @@ DATABASE_URL = os.environ.get(
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
-# === СТАРТ (КАРТИНКА + 3 КНОПКИ + СОХРАНЕНИЕ ПРОФИЛЯ) ===
+# === СТАРТ ОСНОВНОГО БОТА (КНОПКИ) ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     # 1. Сохраняем юзернейм и имя в базу
@@ -54,7 +61,7 @@ async def cmd_start(message: Message):
     except Exception as e:
         logging.error(f"Ошибка сохранения профиля: {e}")
 
-    # 2. Ссылка с ID
+    # 2. Отправляем картинку и кнопки
     portal_url_with_id = f"{PORTAL_URL}?user_id={message.from_user.id}"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -72,118 +79,107 @@ async def cmd_start(message: Message):
         logging.error(f"Ошибка отправки картинки: {e}")
         await message.answer(caption_text, reply_markup=kb)
 
-# === ОБРАБОТКА ПОКУПКИ ПОДАРКА ИЗ МИНИ-АППА ===
+# === БИЗНЕС-БОТ ЛОВИТ ПОДАРКИ НА АККАУНТЕ ===
+@dp.business_message()
+async def handle_business_message(message: Message):
+    # Проверяем, что пришел именно подарок
+    if message.gift:
+        sender_id = message.from_user.id if message.from_user else None
+        
+        # Название подарка (в разных версиях API может быть по-разному)
+        gift_name = f"Gift ID: {message.gift.id}" 
+        
+        logging.info(f"🎁 Поймали подарок {gift_name} от {sender_id}")
+        
+        if sender_id:
+            try:
+                # Добавляем в инвентарь на портале
+                con = get_db(); cur = con.cursor()
+                cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id, status) VALUES (%s, %s, 'from_account', 'inventory')", (sender_id, gift_name))
+                con.commit(); cur.close(); con.close()
+                
+                # Уведомляем юзера (через основного бота)
+                await bot.send_message(
+                    sender_id, 
+                    f"🎁 Подарок успешно зачислен в ваш инвентарь на портале!\n\nЗайдите в мини-апп и выставьте его на продажу."
+                )
+            except Exception as e:
+                logging.error(f"Ошибка при добавлении подарка в базу: {e}")
+    else:
+        # Логируем обычные сообщения на аккаунт (чтобы видеть, что бизнес-бот работает)
+        logging.info(f"Бизнес-сообщение от {message.from_user.id}: {message.text}")
+
+# === ПОКУПКА ПОДАРКА ИЗ МИНИ-АППА ===
 async def handle_buy_gift(request):
     try:
         data = await request.json()
         user_id = int(data.get("user_id"))
-        gift_name = data.get("gift_name")
         gift_id = data.get("gift_id")
         price_gram = float(data.get("price_gram"))
-        
-        # 100 кристаллов за 1 GRAM
-        crystals_reward = int(price_gram * 100)
+        seller_id = data.get("seller_id")
         
         con = get_db(); cur = con.cursor()
+        cur.execute("SELECT name FROM market_items WHERE id = %s AND is_sold = false", (gift_id,))
+        item = cur.fetchone()
+        if not item: 
+            cur.close(); con.close()
+            return web.json_response({"status": "error", "message": "Уже продан"}, status=400)
+        
         cur.execute("SELECT gram_balance, balance FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
-        
-        if not row or float(row[0]) < price_gram:
+        if not row or float(row[0]) < price_gram: 
             cur.close(); con.close()
-            return web.json_response({"status": "error", "message": "Недостаточно GRAM"}, status=400)
+            return web.json_response({"status": "error", "message": "Мало GRAM"}, status=400)
         
         new_gram = float(row[0]) - price_gram
-        new_crystals = int(row[1] or 0) + crystals_reward
+        new_crystals = int(row[1] or 0) + int(price_gram * 100)
         
         cur.execute("UPDATE users SET gram_balance = %s, balance = %s WHERE user_id = %s", (new_gram, new_crystals, user_id))
-        cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id) VALUES (%s, %s, %s)", (user_id, gift_name, gift_id))
-        
+        if seller_id: 
+            cur.execute("UPDATE users SET gram_balance = gram_balance + %s WHERE user_id = %s", (price_gram, seller_id))
+            
+        cur.execute("UPDATE market_items SET is_sold = true WHERE id = %s", (gift_id,))
+        cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id, status) VALUES (%s, %s, %s, 'inventory')", (user_id, item[0], gift_id))
         con.commit(); cur.close(); con.close()
         
-        return web.json_response({"status": "ok", "crystals": crystals_reward, "new_gram": new_gram})
-    except Exception as e:
-        logging.error(f"Ошибка покупки: {e}")
+        return web.json_response({"status": "ok", "crystals": int(price_gram*100)})
+    except Exception as e: 
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-# === ПОПОЛНЕНИЕ ЧЕРЕЗ ЗВЕЗДЫ ===
-async def handle_buy_stars(request):
-    try:
-        data = await request.json()
-        user_id = int(data.get("user_id"))
-        coin = data.get("coin")
-        amount = float(data.get("amount"))
-        stars = int(data.get("stars"))
-
-        await bot.send_invoice(
-            chat_id=user_id,
-            title=f"Покупка {amount} {coin}",
-            description=f"Оплата {stars} Stars",
-            payload=f"buycrypto_{coin}_{amount}",
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice(label="XTR", amount=stars)],
-        )
-        return web.json_response({"status": "ok"})
-    except Exception as e:
-        logging.error(f"Ошибка запроса: {e}")
-        return web.json_response({"status": "error", "message": str(e)}, status=500)
-
-@dp.pre_checkout_query()
-async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
-    await pre_checkout_query.answer(ok=True)
-
-@dp.message(F.successful_payment)
-async def success_payment(message: Message):
-    payload = message.successful_payment.invoice_payload
-    if payload.startswith("buycrypto_"):
-        parts = payload.split("_")
-        coin = parts[1]; amount = float(parts[2]); user_id = message.from_user.id
-        con = get_db(); cur = con.cursor()
-        cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
-        if not cur.fetchone(): cur.execute("INSERT INTO users (user_id) VALUES (%s)", (user_id,))
-        balance_field = f"{coin.lower()}_balance"
-        cur.execute(f"UPDATE users SET {balance_field} = {balance_field} + %s WHERE user_id = %s", (amount, user_id))
-        con.commit(); cur.close(); con.close()
-        await message.answer(f"Куплено {amount} {coin}!")
-
-# === АДМИН-ПАНЕЛЬ ===
-@dp.message(Command("admin_panel"))
-async def admin_panel(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Обнулить всё", callback_data="reset_all_balances")]])
-    await message.answer("Админ-панель:", reply_markup=kb)
-
-@dp.callback_query(F.data == "reset_all_balances")
-async def reset_all_balances(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
-    con = get_db(); cur = con.cursor()
-    cur.execute("UPDATE users SET usdt_balance = 0, gram_balance = 0, sol_balance = 0, trx_balance = 0, balance = 0")
-    con.commit(); cur.close(); con.close()
-    await callback.message.answer("Все балансы обнулены.")
-    await callback.answer()
-
-# === ВЕБ-СЕРВЕР ===
-async def handle_ping(request): return web.Response(text="OK")
+# === ВЕБ-СЕРВЕР (ДЛЯ СВЯЗИ С САЙТОМ) ===
+async def handle_ping(request): 
+    return web.Response(text="OK")
 
 async def start_web_server():
     app = web.Application()
     cors = aiohttp_cors.setup(app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*", allow_methods="*")})
     app.router.add_get('/', handle_ping)
-    app.router.add_post('/buy', handle_buy_stars)
     app.router.add_post('/buy_gift', handle_buy_gift)
     
-    for route in list(app.router.routes()): cors.add(route)
+    for route in list(app.router.routes()): 
+        cors.add(route)
+        
     runner = web.AppRunner(app); await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 10000)))
     await site.start()
     logging.info("ВЕБ-СЕРВЕР ЗАПУЩЕН")
 
+# === ЗАПУСК ВСЕГО ===
 async def main():
+    # Запускаем веб-сервер
     asyncio.create_task(start_web_server())
+    
+    # Запускаем основного бота (для кнопок)
+    logging.info("Запуск основного бота...")
+    asyncio.create_task(dp.start_polling(bot))
+    
+    # Запускаем бизнес-бота (для подарков)
+    logging.info("Запуск бизнес-бота...")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
-    except Exception as e: logging.error(f"Error: {e}")
+        await dp.start_polling(portal_bot)
+    except Exception as e: 
+        logging.error(f"Ошибка бизнес-бота: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
