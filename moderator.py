@@ -20,10 +20,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-# ТВОЙ ADMIN ID
 ADMIN_ID = 1780243441 
-
-# Ссылка на портал
 PORTAL_URL = "https://misu-portal.vercel.app" 
 
 session = AiohttpSession(api=TelegramAPIServer.from_base(config.API_SERVER))
@@ -38,10 +35,26 @@ DATABASE_URL = os.environ.get(
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
-# === СТАРТ (КАРТИНКА + 3 КНОПКИ + ID В ССЫЛКЕ) ===
+# === СТАРТ (КАРТИНКА + 3 КНОПКИ + СОХРАНЕНИЕ ПРОФИЛЯ) ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    # ВОТ ТУТ МЫ ДОБАВЛЯЕМ ?user_id=... К ССЫЛКЕ НА ПОРТАЛ
+    # 1. Сохраняем юзернейм и имя в базу
+    try:
+        con = get_db(); cur = con.cursor()
+        username = message.from_user.username or ""
+        first_name = message.from_user.first_name or "Пользователь"
+        
+        cur.execute("SELECT user_id FROM users WHERE user_id = %s", (message.from_user.id,))
+        if cur.fetchone():
+            cur.execute("UPDATE users SET username = %s, first_name = %s WHERE user_id = %s", (username, first_name, message.from_user.id))
+        else:
+            wallet = 'T' + str(message.from_user.id) + 'CRYPTO'
+            cur.execute("INSERT INTO users (user_id, username, first_name, wallet_address) VALUES (%s, %s, %s, %s)", (message.from_user.id, username, first_name, wallet))
+        con.commit(); cur.close(); con.close()
+    except Exception as e:
+        logging.error(f"Ошибка сохранения профиля: {e}")
+
+    # 2. Ссылка с ID
     portal_url_with_id = f"{PORTAL_URL}?user_id={message.from_user.id}"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -51,8 +64,6 @@ async def cmd_start(message: Message):
     ])
     
     caption_text = "Welcome to Portals! Discover, trade, and collect unique digital gifts in our marketplace. Start exploring now!"
-    
-    # Твой file_id картинки
     photo_file_id = "AgACAgUAAxkBAAEkFMxq5h_wwNR23b-9n7xdcqax53MvQwACaxVrG3VpMFf7gjXKqUmioQEAAwIAA3kAAz0E"
 
     try:
@@ -70,7 +81,7 @@ async def handle_buy_gift(request):
         gift_id = data.get("gift_id")
         price_gram = float(data.get("price_gram"))
         
-        # Начисляем 100 кристаллов за 1 GRAM
+        # 100 кристаллов за 1 GRAM
         crystals_reward = int(price_gram * 100)
         
         con = get_db(); cur = con.cursor()
@@ -84,7 +95,6 @@ async def handle_buy_gift(request):
         new_gram = float(row[0]) - price_gram
         new_crystals = int(row[1] or 0) + crystals_reward
         
-        # Списываем грам, начисляем кристаллы, добавляем в инвентарь
         cur.execute("UPDATE users SET gram_balance = %s, balance = %s WHERE user_id = %s", (new_gram, new_crystals, user_id))
         cur.execute("INSERT INTO inventory (user_id, gift_name, gift_id) VALUES (%s, %s, %s)", (user_id, gift_name, gift_id))
         
@@ -92,7 +102,7 @@ async def handle_buy_gift(request):
         
         return web.json_response({"status": "ok", "crystals": crystals_reward, "new_gram": new_gram})
     except Exception as e:
-        logging.error(f"Ошибка покупки подарка: {e}")
+        logging.error(f"Ошибка покупки: {e}")
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
 # === ПОПОЛНЕНИЕ ЧЕРЕЗ ЗВЕЗДЫ ===
@@ -115,7 +125,7 @@ async def handle_buy_stars(request):
         )
         return web.json_response({"status": "ok"})
     except Exception as e:
-        logging.error(f"Ошибка запроса Stars: {e}")
+        logging.error(f"Ошибка запроса: {e}")
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
 @dp.pre_checkout_query()
@@ -159,8 +169,8 @@ async def start_web_server():
     app = web.Application()
     cors = aiohttp_cors.setup(app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*", allow_methods="*")})
     app.router.add_get('/', handle_ping)
-    app.router.add_post('/buy', handle_buy_stars)       # Пополнение
-    app.router.add_post('/buy_gift', handle_buy_gift)   # Покупка подарка в портале
+    app.router.add_post('/buy', handle_buy_stars)
+    app.router.add_post('/buy_gift', handle_buy_gift)
     
     for route in list(app.router.routes()): cors.add(route)
     runner = web.AppRunner(app); await runner.setup()
